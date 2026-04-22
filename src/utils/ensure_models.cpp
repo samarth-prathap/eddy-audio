@@ -28,9 +28,23 @@ static bool download_single_file(const std::string& url,
     return false;
   }
 
-  // Build curl command (curl must be in PATH)
-  std::string curl_cmd = "curl -L --progress-bar --fail \"" + url + "\" -o \"" +
-                         output_path.string() + "\"";
+  // Escape double-quote characters in a string so it can be safely embedded
+  // inside a double-quoted shell argument.  Backslashes are intentionally NOT
+  // escaped here: on Windows (cmd.exe) they are literal, and on POSIX paths
+  // never contain backslashes, so this covers all realistic cases.
+  auto escape_dquote = [](const std::string& s) -> std::string {
+    std::string r;
+    r.reserve(s.size());
+    for (char c : s) {
+      if (c == '"') r += '\\';
+      r += c;
+    }
+    return r;
+  };
+
+  // Build curl command with properly quoted arguments
+  std::string curl_cmd = "curl -L --progress-bar --fail \"" + escape_dquote(url) +
+                         "\" -o \"" + escape_dquote(output_path.string()) + "\"";
 
   // Execute download
   int ret = std::system(curl_cmd.c_str());

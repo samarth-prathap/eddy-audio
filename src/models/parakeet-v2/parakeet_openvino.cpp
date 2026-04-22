@@ -5,6 +5,7 @@
 #include "eddy/models/parakeet-v2/parakeet_decoder.hpp"
 #include "eddy/models/parakeet-v2/parakeet_chunking.hpp"
 #include "eddy/utils/openvino_utils.hpp"
+#include "eddy/detail/debug_utils.hpp"
 
 #include <openvino/openvino.hpp>
 
@@ -30,12 +31,6 @@ namespace {
 
 constexpr size_t MEL_BINS = 128;  // Standard mel-spectrogram bin count
 constexpr size_t VECTOR_RESERVE_SLACK = 64;  // Extra capacity when reserving vector space
-
-// Whether debug logging is enabled (cached for performance)
-bool is_debug_enabled() {
-  static bool cached = (std::getenv("EDDY_DEBUG") != nullptr);
-  return cached;
-}
 
 struct ChunkPipelineResult {
   std::vector<int> tokens;
@@ -184,7 +179,7 @@ void process_subsequent_chunk(
 
   // Append tokens and timings, skipping duplicates and any filtered prefix/suffix
   if (skip_count >= emit_end) {
-    if (is_debug_enabled()) {
+    if (eddy::is_debug_enabled()) {
       std::cerr << "[EDDY_DEBUG] Entire chunk consists of overlapped region; appending nothing\n";
     }
   } else {
@@ -449,7 +444,7 @@ void OpenVINOParakeet::ensure_compiled_model() const {
       throw std::runtime_error("Joint model output smaller than token+duration heads");
     }
 
-    if (std::getenv("EDDY_DEBUG")) {
+    if (eddy::is_debug_enabled()) {
       std::cerr << "[DEBUG] Joint output size: " << impl_->joint_output_size
                 << ", token head: " << effective_vocab_size
                 << ", duration bins: " << impl_->runtime_cfg.duration_bins.size() << "\n";

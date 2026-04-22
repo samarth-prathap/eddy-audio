@@ -1,6 +1,7 @@
 // OpenVINO utility functions for model compilation and configuration
 
 #include "eddy/utils/openvino_utils.hpp"
+#include "eddy/detail/debug_utils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -56,12 +57,6 @@ ov::AnyMap make_compile_cfg_from_env() {
   return cached.config;
 }
 
-// Check if debug logging is enabled (cached for performance)
-bool is_debug_enabled() {
-  static bool cached = (std::getenv("EDDY_DEBUG") != nullptr);
-  return cached;
-}
-
 // Convert string to uppercase for case-insensitive comparison
 std::string to_upper(const std::string& s) {
   std::string result = s;
@@ -110,7 +105,7 @@ ov::CompiledModel compile_with_npu_fallback(ov::Core& core,
   try {
     return compile_component(core, file, "NPU");
   } catch (const std::exception& e) {
-    if (is_debug_enabled()) {
+    if (eddy::is_debug_enabled()) {
       std::cerr << "[DEBUG] NPU compile failed";
       if (component_name) {
         std::cerr << " for " << component_name;

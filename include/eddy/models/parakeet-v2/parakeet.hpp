@@ -25,6 +25,11 @@ struct RuntimeConfig {
   std::string device = "AUTO";
   int blank_token_id = 1024;
   std::vector<int> duration_bins = {0, 1, 2, 3, 4};
+  /// Apply Parakeet V3 preprocessor length-rounding workaround.
+  /// V3 fails on certain odd-length audio (e.g., 240,135 samples); rounding
+  /// the PCM length to the nearest 1000 samples avoids the bug.
+  /// Set to true when loading a V3 model; leave false for V2.
+  bool v3_preprocessor_workaround = false;
 };
 
 struct SegmentOptions {

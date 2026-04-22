@@ -20,14 +20,14 @@ endif()
 
 option(EDDY_BUILD_EXAMPLES "Build examples" ON)
 option(EDDY_BUILD_CSHARP "Build C# bindings" OFF)
-option(EDDY_ENABLE_WHISPER "Enable Whisper (OpenVINO GenAI) support" ON)
+option(EDDY_ENABLE_WHISPER "Enable Whisper (OpenVINO GenAI) support" OFF)
 
 # Core dependencies
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 find_package(SndFile REQUIRED)
 find_package(SampleRate REQUIRED)
 
-# Whisper support (enabled by default, disable with -DEDDY_ENABLE_WHISPER=OFF)
+# Whisper support (disabled by default; enable with -DEDDY_ENABLE_WHISPER=ON)
 if(EDDY_ENABLE_WHISPER)
   find_package(OpenVINOGenAI REQUIRED)
 endif()
@@ -76,7 +76,7 @@ if(WIN32)
   target_link_libraries(eddy PRIVATE Shell32)
 endif()
 
-# Whisper support (enabled by default)
+# Whisper support (disabled by default; enable with -DEDDY_ENABLE_WHISPER=ON)
 if(EDDY_ENABLE_WHISPER)
   target_sources(eddy PRIVATE src/pipelines/whisper_pipeline.cpp)
   target_compile_definitions(eddy PUBLIC EDDY_WITH_OPENVINO_GENAI=1)

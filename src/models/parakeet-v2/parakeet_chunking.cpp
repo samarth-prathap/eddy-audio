@@ -1,5 +1,6 @@
 #include "eddy/models/parakeet-v2/parakeet_chunking.hpp"
 #include "eddy/models/parakeet-v2/detail/parakeet_impl.hpp"
+#include "eddy/detail/debug_utils.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -99,12 +100,6 @@ size_t holdback_frames_override() {
   return cached;
 }
 
-// Whether debug logging is enabled (set EDDY_DEBUG=1 to enable).
-bool is_debug_enabled() {
-  static bool cached = (std::getenv("EDDY_DEBUG") != nullptr);
-  return cached;
-}
-
 }  // namespace
 
 ChunkDeduplicationResult deduplicate_chunk(
@@ -120,7 +115,7 @@ ChunkDeduplicationResult deduplicate_chunk(
     bool have_last_emitted_frame
 ) {
   // Cache debug flag to avoid repeated getenv calls
-  const bool debug = is_debug_enabled();
+  const bool debug = eddy::is_debug_enabled();
 
   ChunkDeduplicationResult result;
   result.emit_end = curr_tokens.size();  // Default: emit everything

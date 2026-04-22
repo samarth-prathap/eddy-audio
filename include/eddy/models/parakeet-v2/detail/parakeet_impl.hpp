@@ -6,6 +6,7 @@
 
 #include <openvino/openvino.hpp>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
 namespace eddy::parakeet {
@@ -19,6 +20,31 @@ namespace eddy::parakeet {
 // - Implementation can change without breaking API
 //
 // Only parakeet_*.cpp files should include this header.
+
+// Shared helper: read a scalar length value from a tensor that may be i32 or i64.
+// Validates that the length is non-negative.
+[[nodiscard]] inline int64_t read_length_scalar(const ov::Tensor& t) {
+  const auto et = t.get_element_type();
+  int64_t value;
+
+  if (et == ov::element::i64) {
+    value = t.data<int64_t>()[0];
+  } else if (et == ov::element::i32) {
+    const int32_t val32 = t.data<int32_t>()[0];
+    if (val32 < 0) {
+      throw std::runtime_error("Length tensor value is negative: " + std::to_string(val32));
+    }
+    value = static_cast<int64_t>(val32);
+  } else {
+    throw std::runtime_error("Length tensor has unsupported element type (expected i32 or i64)");
+  }
+
+  if (value < 0) {
+    throw std::runtime_error("Length tensor value is negative: " + std::to_string(value));
+  }
+
+  return value;
+}
 
 // Implementation struct for OpenVINOParakeet (Pimpl idiom)
 // Also used directly by helper functions as ParakeetImpl alias

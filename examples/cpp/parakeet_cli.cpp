@@ -3,10 +3,13 @@
 
 #include "eddy/backends/openvino_backend.hpp"
 #include "eddy/core/app_dir.hpp"
+#include "eddy/core/model_configs.hpp"
 #include "eddy/models/parakeet-v2/parakeet.hpp"
 #include "eddy/models/parakeet-v2/parakeet_openvino.hpp"
 #include "eddy/utils/ensure_models.hpp"
 #include "eddy/utils/audio_utils.hpp"
+
+#include <openvino/openvino.hpp>
 
 #include <chrono>
 #include <filesystem>
@@ -16,6 +19,43 @@
 #include <iomanip>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cctype>
+
+static constexpr const char* EDDY_CLI_VERSION = "0.1.0";
+
+// Convert string to uppercase (used for case-insensitive device comparison)
+static std::string to_upper(const std::string& s) {
+    std::string r = s;
+    for (auto& c : r) c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
+    return r;
+}
+
+// Escape a string for embedding in a JSON double-quoted value.
+static std::string json_escape(const std::string& s) {
+    std::string r;
+    r.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  r += "\\\""; break;
+            case '\\': r += "\\\\"; break;
+            case '\n': r += "\\n";  break;
+            case '\r': r += "\\r";  break;
+            case '\t': r += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    // Control characters — emit \uXXXX
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    r += buf;
+                } else {
+                    r += static_cast<char>(c);
+                }
+                break;
+        }
+    }
+    return r;
+}
 
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " <audio.wav> [options]\n\n";
@@ -23,14 +63,18 @@ void print_usage(const char* program_name) {
     std::cout << "  --model <model>      Model version (default: parakeet-v2)\n";
     std::cout << "                       Options: parakeet-v2, parakeet-v3\n";
     std::cout << "  --device <device>    OpenVINO device (default: CPU)\n";
-    std::cout << "                       Options: CPU, AUTO\n";
-    std::cout << "  --help              Show this help message\n\n";
+    std::cout << "                       Examples: CPU, NPU, GPU, AUTO\n";
+    std::cout << "  --output-json        Write result as JSON to stdout; route progress to stderr\n";
+    std::cout << "  --list-devices       List available OpenVINO devices and exit\n";
+    std::cout << "  --version            Print version and exit\n";
+    std::cout << "  --help               Show this help message\n\n";
     std::cout << "Requirements:\n";
-    std::cout << "  - Audio must be 16kHz mono or stereo WAV file\n";
-    std::cout << "  - Models will be loaded from cache or models/parakeet/\n\n";
-    std::cout << "Example:\n";
+    std::cout << "  - Audio must be WAV file (any sample rate; resampled to 16 kHz automatically)\n";
+    std::cout << "  - Models are downloaded automatically on first run\n\n";
+    std::cout << "Examples:\n";
     std::cout << "  " << program_name << " test.wav\n";
-    std::cout << "  " << program_name << " test.wav --model parakeet-v3 --device CPU\n";
+    std::cout << "  " << program_name << " test.wav --model parakeet-v3 --device NPU\n";
+    std::cout << "  " << program_name << " test.wav --output-json > result.json\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -47,12 +91,36 @@ int main(int argc, char* argv[]) {
     std::string audio_file;
     std::string device = "CPU";
     std::string model_name = "parakeet-v2";
+    bool output_json = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
 
         if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
+            return 0;
+        } else if (arg == "--version" || arg == "-v") {
+            std::cout << "parakeet_cli version " << EDDY_CLI_VERSION << "\n";
+            return 0;
+        } else if (arg == "--list-devices") {
+            try {
+                ov::Core core;
+                auto devices = core.get_available_devices();
+                std::cout << "Available OpenVINO devices:\n";
+                for (const auto& d : devices) {
+                    std::string full_name;
+                    try {
+                        full_name = core.get_property(d, ov::device::full_name);
+                    } catch (...) {}
+                    std::cout << "  " << d;
+                    if (!full_name.empty()) std::cout << "  (" << full_name << ")";
+                    std::cout << "\n";
+                }
+                if (devices.empty()) std::cout << "  (none detected)\n";
+            } catch (const std::exception& e) {
+                std::cerr << "[ERROR] Could not query devices: " << e.what() << "\n";
+                return 1;
+            }
             return 0;
         } else if (arg == "--model") {
             if (i + 1 >= argc) {
@@ -61,7 +129,8 @@ int main(int argc, char* argv[]) {
             }
             model_name = argv[++i];
             if (model_name != "parakeet-v2" && model_name != "parakeet-v3") {
-                std::cerr << "Error: Invalid model. Use 'parakeet-v2' or 'parakeet-v3'\n";
+                std::cerr << "Error: Invalid model '" << model_name
+                          << "'. Use 'parakeet-v2' or 'parakeet-v3'\n";
                 return 1;
             }
         } else if (arg == "--device") {
@@ -70,6 +139,8 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             device = argv[++i];
+        } else if (arg == "--output-json") {
+            output_json = true;
         } else {
             // Assume it's the audio file
             audio_file = arg;
@@ -82,38 +153,98 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "=== Parakeet TDT Transcription CLI (" << model_name << ") ===\n\n";
+    // When --output-json is set, route all progress/status text to stderr so
+    // stdout stays clean for the JSON result.
+    std::ostream& info = output_json ? std::cerr : std::cout;
+
+    // Validate device name (skip meta-devices that OpenVINO always accepts)
+    {
+        const std::string dev_up = to_upper(device);
+        const bool is_meta = (dev_up == "AUTO" ||
+                              dev_up.rfind("HETERO:", 0) == 0 ||
+                              dev_up.rfind("MULTI:", 0) == 0);
+        if (!is_meta) {
+            try {
+                ov::Core probe;
+                auto available = probe.get_available_devices();
+                bool found = false;
+                for (const auto& d : available) {
+                    // Accept exact match or prefix match (e.g., "GPU" matches "GPU.0")
+                    const std::string d_up = to_upper(d);
+                    if (d_up == dev_up || d_up.rfind(dev_up, 0) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    std::cerr << "Error: Device '" << device << "' is not available.\n";
+                    std::cerr << "Available devices:";
+                    for (const auto& d : available) std::cerr << " " << d;
+                    if (available.empty()) std::cerr << " (none detected)";
+                    std::cerr << "\n";
+                    std::cerr << "Use --list-devices for details, or --device AUTO to let OpenVINO choose.\n";
+                    return 1;
+                }
+            } catch (const std::exception& e) {
+                // Non-fatal: continue and let OpenVINO produce its own error if the device is invalid.
+                std::cerr << "[WARN] Could not validate device: " << e.what() << "\n";
+            }
+        }
+    }
+
+    info << "=== Parakeet TDT Transcription CLI (" << model_name << ") ===\n\n";
 
     try {
         // Load audio file
-        std::cout << "Loading audio: " << audio_file << " ... ";
-        std::cout.flush();
+        info << "Loading audio: " << audio_file << " ... ";
         auto audio_samples = eddy::audio::read_wav(audio_file);
-        std::cout << "[OK]\n";
-        std::cout << "  Samples: " << audio_samples.size() << "\n";
-        std::cout << "  Duration: " << std::fixed << std::setprecision(2)
-                  << (audio_samples.size() / 16000.0) << " seconds\n\n";
+        info << "[OK]\n";
+        info << "  Samples: " << audio_samples.size() << "\n";
+        info << "  Duration: " << std::fixed << std::setprecision(2)
+             << (audio_samples.size() / 16000.0) << " seconds\n\n";
 
         // Create OpenVINO backend
-        std::cout << "Initializing OpenVINO backend (" << device << ") ... ";
-        std::cout.flush();
-        // Set compiled model cache to the per-model cache dir
+        info << "Initializing OpenVINO backend (" << device << ") ... ";
         auto compiled_cache_dir = eddy::get_model_dir(model_name).string();
         eddy::OpenVINOOptions ov_opts;
         ov_opts.device = device;
         ov_opts.cache_dir = compiled_cache_dir;
         auto backend = std::make_shared<eddy::OpenVINOBackend>(ov_opts);
-        std::cout << "[OK]\n";
+        info << "[OK]\n";
 
-        // Determine model directory: ensure cache has required files (centralized helper)
+        // Ensure model files are present — download if necessary
         auto cache_model_dir = eddy::get_model_assets_dir(model_name);
-        std::filesystem::path model_dir;
-        std::string fetch_err;
-        if (!eddy::parakeet::check_models_available(cache_model_dir, &fetch_err)) {
-            if (!fetch_err.empty()) std::cout << "[INFO] " << fetch_err << "\n";
+        {
+            std::string check_err;
+            if (!eddy::parakeet::check_models_available(cache_model_dir, &check_err)) {
+                info << "[INFO] " << check_err << "\n";
+                info << "Downloading models from HuggingFace (this may take several minutes)...\n";
+
+                auto it = eddy::model_configs::MODEL_MAP.find(model_name);
+                if (it == eddy::model_configs::MODEL_MAP.end()) {
+                    std::cerr << "[ERROR] No download config found for model: " << model_name << "\n";
+                    return 1;
+                }
+
+                std::string dl_err;
+                bool ok = eddy::parakeet::download_models(
+                    it->second, cache_model_dir, &dl_err,
+                    [&info](const std::string& fname, int cur, int total) {
+                        info << "  [" << cur << "/" << total << "] " << fname << "\n";
+                    });
+
+                if (!ok) {
+                    std::cerr << "[ERROR] Model download failed: " << dl_err << "\n";
+                    std::cerr << "  You can retry by running hf_fetch_models --model " << model_name << "\n";
+                    std::cerr << "  or manually place model files in: " << cache_model_dir.string() << "\n";
+                    return 1;
+                }
+                info << "Download complete.\n";
+            }
         }
 
-        // Prefer cache if encoder xml exists (minimum signal of a complete set)
+        // Resolve model directory
+        std::filesystem::path model_dir;
         auto exists_nonempty = [](const std::filesystem::path& p) -> bool {
             std::error_code ec;
             auto size = std::filesystem::file_size(p, ec);
@@ -121,52 +252,52 @@ int main(int argc, char* argv[]) {
         };
         if (exists_nonempty(cache_model_dir / "parakeet_encoder.xml")) {
             model_dir = cache_model_dir;
-            std::cout << "Using cached models at: " << cache_model_dir.string() << "\n\n";
+            info << "Using cached models at: " << cache_model_dir.string() << "\n\n";
         } else {
             // Fallback: legacy Windows path (%LOCALAPPDATA%\eddy\cache\models\<name>\files)
 #if defined(_WIN32)
             auto legacy_dir = eddy::get_app_data_dir() / "cache" / "models" / model_name / "files";
             if (exists_nonempty(legacy_dir / "parakeet_encoder.xml")) {
                 model_dir = legacy_dir;
-                std::cout << "Using legacy cached models at: " << legacy_dir.string() << "\n\n";
+                info << "Using legacy cached models at: " << legacy_dir.string() << "\n\n";
             } else
 #endif
             {
                 model_dir = "models/parakeet";
-                std::cout << "Using local models at: " << model_dir.string() << "\n";
-                std::cout << "Note: Copy models to " << cache_model_dir.string() << " for user cache access\n\n";
+                info << "Using local models at: " << model_dir.string() << "\n";
+                info << "Note: Copy models to " << cache_model_dir.string() << " for user cache access\n\n";
             }
         }
 
         // Configure model paths
         eddy::parakeet::ModelPaths paths{
             .preprocessor = {.path = (model_dir / "parakeet_melspectogram.xml").string()},
-            .encoder = {.path = (model_dir / "parakeet_encoder.xml").string()},
-            .decoder = {.path = (model_dir / "parakeet_decoder.xml").string()},
-            .joint = {.path = (model_dir / "parakeet_joint.xml").string()},
+            .encoder      = {.path = (model_dir / "parakeet_encoder.xml").string()},
+            .decoder      = {.path = (model_dir / "parakeet_decoder.xml").string()},
+            .joint        = {.path = (model_dir / "parakeet_joint.xml").string()},
             .tokenizer_json = (model_dir / "parakeet_vocab.json").string()
         };
 
-        // Configure runtime (v2 uses blank_token_id=1024, v3 uses blank_token_id=8192)
-        int blank_token_id = (model_name == "parakeet-v3") ? 8192 : 1024;
+        // Configure runtime
+        // V2: blank_token_id=1024; V3: blank_token_id=8192
+        const bool is_v3 = (model_name == "parakeet-v3");
         eddy::parakeet::RuntimeConfig cfg{
             .device = device,
-            .blank_token_id = blank_token_id,
-            .duration_bins = {0, 1, 2, 3, 4}
+            .blank_token_id = is_v3 ? 8192 : 1024,
+            .duration_bins = {0, 1, 2, 3, 4},
+            .v3_preprocessor_workaround = is_v3
         };
 
         // Load models
-        std::cout << "Loading Parakeet models ... ";
-        std::cout.flush();
+        info << "Loading Parakeet models ... ";
         auto model = eddy::parakeet::make_openvino_parakeet(backend, paths, cfg);
-        std::cout << "[OK]\n";
+        info << "[OK]\n";
 
         // Warmup
-        std::cout << "Warming up model ... ";
-        std::cout.flush();
+        info << "Warming up model ... ";
         auto parakeet_model = std::static_pointer_cast<eddy::parakeet::OpenVINOParakeet>(model);
         parakeet_model->warmup();
-        std::cout << "[OK]\n\n";
+        info << "[OK]\n\n";
 
         // Prepare audio segment
         eddy::parakeet::AudioSegment segment;
@@ -174,21 +305,53 @@ int main(int argc, char* argv[]) {
         segment.pcm = audio_samples;
 
         // Run inference
-        std::cout << std::string(70, '=') << "\n";
-        std::cout << "TRANSCRIBING...\n";
-        std::cout << std::string(70, '=') << "\n\n";
+        info << std::string(70, '=') << "\n";
+        info << "TRANSCRIBING...\n";
+        info << std::string(70, '=') << "\n\n";
 
         eddy::parakeet::SegmentOptions options;
         auto start = std::chrono::high_resolution_clock::now();
         auto result = model->infer(segment, options);
-        auto end = std::chrono::high_resolution_clock::now();
+        auto end   = std::chrono::high_resolution_clock::now();
 
         // Calculate metrics
         auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
         float audio_duration = audio_samples.size() / 16000.0f;
         float rtfx = (duration_ms > 0) ? audio_duration / (duration_ms / 1000.0f) : 0.0f;
 
-        // Display results
+        // ---------------------------------------------------------------
+        // JSON output path
+        // ---------------------------------------------------------------
+        if (output_json) {
+            std::ostringstream js;
+            js << "{\n";
+            js << "  \"text\": \"" << json_escape(result.text) << "\",\n";
+            js << "  \"model\": \"" << json_escape(model_name) << "\",\n";
+            js << "  \"device\": \"" << json_escape(device) << "\",\n";
+            js << "  \"latency_ms\": " << std::fixed << std::setprecision(1) << duration_ms << ",\n";
+            js << "  \"audio_duration_s\": " << std::fixed << std::setprecision(3) << audio_duration << ",\n";
+            js << "  \"rtfx\": " << std::fixed << std::setprecision(2) << rtfx << ",\n";
+            js << "  \"confidence\": " << std::fixed << std::setprecision(4)
+               << result.overall_confidence << ",\n";
+            js << "  \"tokens\": " << result.token_ids.size() << ",\n";
+            js << "  \"token_timings\": [\n";
+            for (size_t i = 0; i < result.token_timings.size(); ++i) {
+                const auto& t = result.token_timings[i];
+                js << "    {\"token_id\": " << t.token_id
+                   << ", \"time_s\": " << std::fixed << std::setprecision(3) << (t.frame_index * 0.08f)
+                   << ", \"confidence\": " << std::fixed << std::setprecision(4) << t.confidence << "}";
+                if (i + 1 < result.token_timings.size()) js << ",";
+                js << "\n";
+            }
+            js << "  ]\n";
+            js << "}\n";
+            std::cout << js.str();
+            return 0;
+        }
+
+        // ---------------------------------------------------------------
+        // Human-readable output path
+        // ---------------------------------------------------------------
         std::cout << "Result:\n";
         std::cout << std::string(70, '-') << "\n";
         std::cout << result.text << "\n";
@@ -210,7 +373,6 @@ int main(int argc, char* argv[]) {
             const size_t num_to_show = std::min(size_t(10), result.token_timings.size());
             for (size_t i = 0; i < num_to_show; ++i) {
                 const auto& timing = result.token_timings[i];
-                // Convert frame_index to seconds (frame * 0.08)
                 float time_seconds = timing.frame_index * 0.08f;
                 std::cout << "  " << std::setw(3) << i+1 << ". "
                           << "t=" << std::fixed << std::setprecision(2) << std::setw(5) << time_seconds << "s "
@@ -241,11 +403,12 @@ int main(int argc, char* argv[]) {
     } catch (const std::exception& e) {
         std::cerr << "\n[ERROR] " << e.what() << "\n\n";
         std::cerr << "Troubleshooting:\n";
-        std::cerr << "  1. Ensure audio file is 16kHz WAV format\n";
+        std::cerr << "  1. Ensure audio file is a supported format (WAV recommended)\n";
         std::cerr << "  2. Check models are in: " << eddy::get_model_assets_dir(model_name).string() << "\n";
-        std::cerr << "     or in: models/parakeet/\n";
+        std::cerr << "     or run: hf_fetch_models --model " << model_name << "\n";
         std::cerr << "  3. Verify OpenVINO runtime is properly installed\n";
-        std::cerr << "  4. Try --device CPU if AUTO fails\n";
+        std::cerr << "  4. Run --list-devices to see available devices\n";
+        std::cerr << "  5. Try --device CPU if another device fails\n";
         return 1;
     }
 }

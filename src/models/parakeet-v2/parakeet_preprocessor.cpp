@@ -7,35 +7,6 @@
 
 namespace eddy::parakeet {
 
-namespace {
-
-// Read a single scalar length value from a tensor that may be i32 or i64.
-// Validates that the length is non-negative.
-[[nodiscard]] int64_t read_length_scalar(const ov::Tensor& t) {
-  const auto et = t.get_element_type();
-  int64_t value;
-
-  if (et == ov::element::i64) {
-    value = t.data<int64_t>()[0];
-  } else if (et == ov::element::i32) {
-    int32_t val32 = t.data<int32_t>()[0];
-    if (val32 < 0) {
-      throw std::runtime_error("Preprocessor length is negative: " + std::to_string(val32));
-    }
-    value = static_cast<int64_t>(val32);
-  } else {
-    throw std::runtime_error("Unsupported length tensor element type");
-  }
-
-  if (value < 0) {
-    throw std::runtime_error("Preprocessor length is negative: " + std::to_string(value));
-  }
-
-  return value;
-}
-
-}  // namespace
-
 MelFeatures run_preprocessor(ParakeetImpl& impl, const AudioSegment& segment) {
   if (segment.pcm.empty()) {
     throw std::invalid_argument("Audio segment contains no PCM samples");
@@ -44,15 +15,16 @@ MelFeatures run_preprocessor(ParakeetImpl& impl, const AudioSegment& segment) {
     throw std::invalid_argument("Parakeet OpenVINO pipeline expects 16 kHz audio samples");
   }
 
-  // Workaround for v3 preprocessor bug: round sample count to nearest 1000
-  // v3 fails on specific odd-length audio (e.g., 240,135 samples)
+  // Workaround for V3 preprocessor bug: round sample count to nearest 1000.
+  // V3 fails on certain odd-length audio (e.g., 240,135 samples); V2 is not affected.
   AudioSegment working_segment = segment;
-  const size_t original_size = segment.pcm.size();
-  const size_t round_to = 1000;
-  const size_t rounded_size = ((original_size + round_to - 1) / round_to) * round_to;
-
-  if (rounded_size != original_size) {
-    working_segment.pcm.resize(rounded_size, 0.0F);  // Pad with zeros
+  if (impl.runtime_cfg.v3_preprocessor_workaround) {
+    const size_t original_size = segment.pcm.size();
+    const size_t round_to = 1000;
+    const size_t rounded_size = ((original_size + round_to - 1) / round_to) * round_to;
+    if (rounded_size != original_size) {
+      working_segment.pcm.resize(rounded_size, 0.0F);  // Pad with zeros
+    }
   }
 
   // Query preprocessor window size from compiled model shape.
