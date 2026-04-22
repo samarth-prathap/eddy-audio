@@ -4,6 +4,7 @@
 #include "eddy/backends/openvino_backend.hpp"
 #include "eddy/core/app_dir.hpp"
 #include "eddy/core/model_configs.hpp"
+#include "eddy/detail/debug_utils.hpp"
 #include "eddy/models/parakeet-v2/parakeet.hpp"
 #include "eddy/models/parakeet-v2/parakeet_openvino.hpp"
 #include "eddy/utils/ensure_models.hpp"
@@ -20,16 +21,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <cctype>
 
 static constexpr const char* EDDY_CLI_VERSION = "0.1.0";
-
-// Convert string to uppercase (used for case-insensitive device comparison)
-static std::string to_upper(const std::string& s) {
-    std::string r = s;
-    for (auto& c : r) c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
-    return r;
-}
 
 // Escape a string for embedding in a JSON double-quoted value.
 static std::string json_escape(const std::string& s) {
@@ -159,7 +152,7 @@ int main(int argc, char* argv[]) {
 
     // Validate device name (skip meta-devices that OpenVINO always accepts)
     {
-        const std::string dev_up = to_upper(device);
+        const std::string dev_up = eddy::to_upper(device);
         const bool is_meta = (dev_up == "AUTO" ||
                               dev_up.rfind("HETERO:", 0) == 0 ||
                               dev_up.rfind("MULTI:", 0) == 0);
@@ -170,7 +163,7 @@ int main(int argc, char* argv[]) {
                 bool found = false;
                 for (const auto& d : available) {
                     // Accept exact match or prefix match (e.g., "GPU" matches "GPU.0")
-                    const std::string d_up = to_upper(d);
+                    const std::string d_up = eddy::to_upper(d);
                     if (d_up == dev_up || d_up.rfind(dev_up, 0) == 0) {
                         found = true;
                         break;
@@ -196,7 +189,7 @@ int main(int argc, char* argv[]) {
 
     try {
         // Load audio file
-        info << "Loading audio: " << audio_file << " ... ";
+        info << "Loading audio: " << audio_file << " ... " << std::flush;
         auto audio_samples = eddy::audio::read_wav(audio_file);
         info << "[OK]\n";
         info << "  Samples: " << audio_samples.size() << "\n";
@@ -204,7 +197,7 @@ int main(int argc, char* argv[]) {
              << (audio_samples.size() / 16000.0) << " seconds\n\n";
 
         // Create OpenVINO backend
-        info << "Initializing OpenVINO backend (" << device << ") ... ";
+        info << "Initializing OpenVINO backend (" << device << ") ... " << std::flush;
         auto compiled_cache_dir = eddy::get_model_dir(model_name).string();
         eddy::OpenVINOOptions ov_opts;
         ov_opts.device = device;
@@ -220,15 +213,12 @@ int main(int argc, char* argv[]) {
                 info << "[INFO] " << check_err << "\n";
                 info << "Downloading models from HuggingFace (this may take several minutes)...\n";
 
-                auto it = eddy::model_configs::MODEL_MAP.find(model_name);
-                if (it == eddy::model_configs::MODEL_MAP.end()) {
-                    std::cerr << "[ERROR] No download config found for model: " << model_name << "\n";
-                    return 1;
-                }
-
+                // model_name has already been validated against MODEL_MAP's keys at arg-parse
+                // time, so .at() is safe here.
+                auto& model_cfg = eddy::model_configs::MODEL_MAP.at(model_name);
                 std::string dl_err;
                 bool ok = eddy::parakeet::download_models(
-                    it->second, cache_model_dir, &dl_err,
+                    model_cfg, cache_model_dir, &dl_err,
                     [&info](const std::string& fname, int cur, int total) {
                         info << "  [" << cur << "/" << total << "] " << fname << "\n";
                     });

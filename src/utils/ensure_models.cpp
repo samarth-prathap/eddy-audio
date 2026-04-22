@@ -28,23 +28,37 @@ static bool download_single_file(const std::string& url,
     return false;
   }
 
-  // Escape double-quote characters in a string so it can be safely embedded
-  // inside a double-quoted shell argument.  Backslashes are intentionally NOT
-  // escaped here: on Windows (cmd.exe) they are literal, and on POSIX paths
-  // never contain backslashes, so this covers all realistic cases.
-  auto escape_dquote = [](const std::string& s) -> std::string {
-    std::string r;
-    r.reserve(s.size());
+  // Quote a string for safe embedding in a shell command.
+  //
+  // Windows (cmd.exe): wrap in double quotes and escape embedded double quotes.
+  //   cmd.exe does not interpret metacharacters inside double-quoted args.
+  //
+  // POSIX sh: wrap in single quotes and escape embedded single quotes with `'\''`.
+  //   Single-quoting disables ALL shell metacharacter expansion, so characters
+  //   like `;`, `|`, `&`, `$`, and backticks are fully neutralised.
+  auto quote_for_shell = [](const std::string& s) -> std::string {
+#ifdef _WIN32
+    std::string r = "\"";
     for (char c : s) {
-      if (c == '"') r += '\\';
-      r += c;
+      if (c == '"') r += "\\\"";
+      else r += c;
     }
+    r += "\"";
     return r;
+#else
+    std::string r = "'";
+    for (char c : s) {
+      if (c == '\'') r += "'\\''";  // end-quote, escaped literal ', re-open quote
+      else r += c;
+    }
+    r += "'";
+    return r;
+#endif
   };
 
   // Build curl command with properly quoted arguments
-  std::string curl_cmd = "curl -L --progress-bar --fail \"" + escape_dquote(url) +
-                         "\" -o \"" + escape_dquote(output_path.string()) + "\"";
+  std::string curl_cmd = "curl -L --progress-bar --fail " + quote_for_shell(url) +
+                         " -o " + quote_for_shell(output_path.string());
 
   // Execute download
   int ret = std::system(curl_cmd.c_str());

@@ -57,15 +57,6 @@ ov::AnyMap make_compile_cfg_from_env() {
   return cached.config;
 }
 
-// Convert string to uppercase for case-insensitive comparison
-std::string to_upper(const std::string& s) {
-  std::string result = s;
-  for (auto& c : result) {
-    c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
-  }
-  return result;
-}
-
 }  // anonymous namespace
 
 ov::CompiledModel compile_component(ov::Core& core, const ModelFile& file, const std::string& device) {
@@ -96,7 +87,7 @@ ov::CompiledModel compile_with_npu_fallback(ov::Core& core,
                                             const std::string& device,
                                             const char* component_name) {
   // Case-insensitive device comparison
-  const bool target_npu = (to_upper(device) == "NPU");
+  const bool target_npu = (eddy::to_upper(device) == "NPU");
 
   if (!target_npu) {
     return compile_component(core, file, device);
